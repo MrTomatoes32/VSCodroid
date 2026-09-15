@@ -319,9 +319,12 @@ rather than collected plus a sharing purpose of app functionality. Check the
 other thirty-six data types are still blank before importing, because a
 stray value there declares sharing the app does not do.
 
-Everything else the app touches stays on the device or goes only where the user
-sent it: Git remotes they configured, package registries they invoked, SSH hosts
-they named, and the extension registry when they browse it. None of that is
+Everything else the app touches stays on the device or goes to a third party the
+user works with: Git remotes they configured, package registries they invoked,
+SSH hosts they named, and the extension registry. The registry is reached when
+the user browses it, and also without asking, when the editor checks it for
+updates to installed extensions and when opening a Python file looks up the
+Black Formatter extension the app recommends. None of that is
 collection or sharing under Play's definition, because the app is not the party
 receiving it.
 
@@ -518,12 +521,15 @@ that does not exist yet:
 # 1. Edit wheelhouse.json: the entries, and release-tag to the next unused wheels-<minor>-<n>.
 python3 scripts/build-wheelhouse.py            # verifies, keeps wheels in .build/wheelhouse, writes the page
 gh release create <release-tag> --prerelease --title "Python wheelhouse <release-tag>" \
-  --notes "..." .build/wheelhouse/*.whl         # the release-tag the page names
+  --notes "..." .build/wheelhouse/*.whl .build/wheelhouse/*-THIRD-PARTY-NOTICES.txt
 # 2. Merge wheelhouse.json and docs/site/wheels/<minor>/wheels.html; pages.yml publishes the page.
 ```
 
 A new release tag rather than new assets on an old one: the page carries each wheel's digest, and a
-device that fetched the previous page must keep finding the files it names. The page is served by
+device that fetched the previous page must keep finding the files it names. The one exception is a
+notices file added for a wheel already on the release (`notices` in `wheelhouse.json`): it changes
+no file the previous page names, so it is uploaded to the existing release with `gh release upload`
+before the page that links it is merged. The page is served by
 GitHub Pages because pip reads a find-links page only as `text/html`, and release assets are served
 as `application/octet-stream`. `check-wheelhouse-abi.py` fails a build whose page and manifest
 disagree.

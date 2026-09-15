@@ -580,6 +580,7 @@ class FirstRunSetup(
             // and leaves both. Here the runtime is already in place, so this is
             // only the cleanup half.
             reconcilePythonRuntimeLocked()
+            if (isUpgrade) pruneDroppedBuiltInExtensions()
 
             reportProgress(context.getString(R.string.setup_step_git), 82)
             setupGitCore()
@@ -1674,7 +1675,8 @@ class FirstRunSetup(
             // that count is the user's, and appending after it would replace
             // it, since bash takes the last definition.
             val ourPipBlocks = PIP_BLOCK_HEADER.toRegex(RegexOption.LITERAL).findAll(content).count()
-            val theirOwnPip = PIP_DEFINITION.findAll(content).count() > ourPipBlocks
+            val theirOwnPip = PIP_DEFINITION.findAll(content).count() > ourPipBlocks ||
+                PIP3_DEFINITION.findAll(content).count() > ourPipBlocks
             if (!content.contains(pipBlockMarker) && !theirOwnPip) {
                 additions.append(pipBashFunctions())
                 added += "pip/pip3"
@@ -2441,8 +2443,16 @@ __vscodroid_pip_note() {
     /** The comment every pip block this app has written opens with, v1.3.0's included. */
     private val PIP_BLOCK_HEADER = "# pip/pip3: shell functions."
 
-    /** A `pip()` definition at the start of a line, whoever wrote it. */
-    private val PIP_DEFINITION = Regex("""(?m)^\s*pip\(\)""")
+    /**
+     * A `pip` definition at the start of a line, whoever wrote it, in every spelling
+     * bash accepts: `pip()`, `pip ()`, `function pip {` and `function pip()`. Only
+     * `pip()` was matched, so a v1.3.0 user's `function pip { ... }` below the old
+     * block counted as nothing and the new block was appended after it, replacing it.
+     */
+    private val PIP_DEFINITION = Regex("""(?m)^\s*(?:function\s+pip(?=[\s({]|$)|pip\s*\(\s*\))""")
+
+    /** The same for `pip3`, which every pip block this app writes also defines. */
+    private val PIP3_DEFINITION = Regex("""(?m)^\s*(?:function\s+pip3(?=[\s({]|$)|pip3\s*\(\s*\))""")
 
     /**
      * `claude` in the terminal, which the extension's own login screen suggests.
@@ -2456,8 +2466,8 @@ __vscodroid_pip_note() {
     private fun claudeBashFunction(): String = """
 
 # claude: the CLI the Claude Code extension brings with it. Started through
-# libclaude-launch.so, which puts the seccomp shim into LD_PRELOAD and then execs
-# musl's loader: the CLI is a musl binary under filesDir, which SELinux will not
+# libclaude-launch.so, which execs musl's loader with the seccomp shim as its
+# --preload option: the CLI is a musl binary under filesDir, which SELinux will not
 # execve but will let a loader map, and its runtime calls a syscall Android does
 # not allow before android15 (see the message below). Both are found on PATH,
 # which already includes nativeLibraryDir.
@@ -3686,6 +3696,35 @@ claude() {
      * flight cannot outlive the run: the skip it licenses is only ever for a
      * retry of an attempt that did not finish.
      */
+    /**
+     * Removes the built-in extensions an upgrade's server tree no longer carries.
+     *
+     * Extraction merges and never removes, and the server loads built-in extensions
+     * by listing `server/vscode-reh/extensions`, so an extension a VS Code bump drops
+     * or renames stayed on upgraded devices and loaded beside its replacement, with
+     * both contributing the same views and editors. Upstream has renamed one before
+     * (image-preview became media-preview).
+     *
+     * Only top-level directories, and only against a listing that could be read: an
+     * empty or unreadable listing removes nothing. Nothing but extraction writes a
+     * top-level entry there; the Copilot aliases go inside `extensions/copilot`, and
+     * extensions a user installs live under `--extensions-dir`.
+     */
+    private fun pruneDroppedBuiltInExtensions() {
+        val bundled = try {
+            context.assets.list("vscode-reh/extensions")?.toSet()
+        } catch (e: IOException) {
+            null
+        }
+        if (bundled.isNullOrEmpty()) return
+        File(context.filesDir, "server/vscode-reh/extensions").listFiles()
+            ?.filter { it.name !in bundled }
+            ?.forEach {
+                Logger.i(tag, "Removing built-in extension ${it.name}, which this build no longer ships")
+                StorageManager.deleteRecursive(it)
+            }
+    }
+
     private fun markSetupComplete() {
         prefs.edit(commit = true) {
             putString(KEY_VERSION, getCurrentVersion())

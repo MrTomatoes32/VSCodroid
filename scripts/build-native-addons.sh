@@ -68,8 +68,12 @@ echo "=== Building native addons for Android ARM64 (Bionic) ==="
 
 # --- Toolchain -------------------------------------------------------------
 
-if [ -n "${ANDROID_NDK_HOME:-}" ]; then
-    NDK_DIR="$ANDROID_NDK_HOME"
+# ANDROID_NDK_ROOT as well, the way build-glibc-shim.sh, build-exec-trampoline.sh
+# and build-claude-shim.sh take it and setup.sh accepts it: one variable honoured
+# there and not here built the addons with a different NDK from the shims, or
+# failed here after every download setup.sh had let through.
+if [ -n "${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}" ]; then
+    NDK_DIR="${ANDROID_NDK_HOME:-$ANDROID_NDK_ROOT}"
 elif [ -n "${ANDROID_HOME:-}" ] && [ -d "$ANDROID_HOME/ndk" ]; then
     NDK_DIR="$(ls -d "$ANDROID_HOME/ndk/"* 2>/dev/null | sort -V | tail -1)"
 elif [ -d "$HOME/Library/Android/sdk/ndk" ]; then
@@ -309,9 +313,12 @@ fetch() {
     fi
     pack_pinned "$pkg" "$version" "$expected" "$tgz" || return 1
 
-    if [ ! -f "$dir/package.json" ]; then
-        ( cd "$dir" && tar xzf source.tgz --strip-components=1 )
-    fi
+    # Unpacked over a cleared directory on every run, keeping only the two
+    # tarballs pack_pinned re-hashes. Behind a package.json guard, an edited or
+    # half-extracted source file beside a verified tarball was compiled as it
+    # stood, which is the trust the paragraph above pack_pinned says this avoids.
+    find "$dir" -mindepth 1 -maxdepth 1 ! -name source.tgz ! -name node-addon-api.tgz -exec rm -rf {} +
+    ( cd "$dir" && tar xzf source.tgz --strip-components=1 )
 
     # node-addon-api supplies napi.h; nothing else is needed to link. Unpacked
     # under node_modules by hand rather than written into a package.json that

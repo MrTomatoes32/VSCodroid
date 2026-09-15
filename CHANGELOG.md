@@ -35,10 +35,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A long press opens the editor menu whether the keyboard is up or down, and using it leaves the keyboard where it was. Tapping an item runs it, a submenu opens, Esc closes one level and tapping away closes the menu.
 - Paste works again, in the editor, the terminal, the Command Palette and anything an extension pastes into. Copying put text on the device clipboard and pasting it back raised "Unable to read from the browser's clipboard", asking for a permission a WebView has no way to grant.
 - Signing in to GitHub no longer goes through a confirmation dialog first. The sign-in ends by opening github.com, and every address outside the extension marketplace was treated as untrusted.
+- The editor is not reloaded when Android ends only the process that started its server. The server kept running and the page was still connected, but the reload restarted extensions and could drop an edit made a moment before.
+- Opening a device folder from Open Recent after it dropped off the recent folders list says the permission expired. It opened a copy that nothing synced back to the device.
+- Removing a toolchain no longer deletes files outside it through a folder you linked into its directory.
+- A browser sign-in returns only to VSCodroid. Another installed app declaring the same callback link could be offered the result in a chooser.
 - A confirmation dialog fits a phone screen. It was drawn wider than the screen and centred, so the button that proceeds hung off the right edge with a letter of it showing.
 - The editor keeps a usable height in landscape with the keyboard up. The extra key row took the last of the space the keyboard left, so the file being renamed and the line being typed were both off screen.
 - An extension that opens a preview in your browser now opens one. Live Server and everything like it reported "Could not open the default browser" and left the address to be copied by hand.
-- A command installed with `pip` runs. `black`, `pytest`, `ruff`, `httpie` and anything else that brings a command with it installed successfully and then refused to start, because Android will not run a script out of the app's own storage. A command installed while the app is running becomes available the next time you open it.
+- Commands Claude Code runs start. Every `bash` and `node` process it launched aborted with "stack corruption detected", on every Android version.
+- A command `pip` installs outside a virtual environment runs, such as `black`, `pytest` or `httpie`. It installed and then refused to start. One installed while the editor is open works after switching away and back, in a new terminal.
+- A command installed with `gem install` runs, the same way. It installed and was then not found.
 
 ## [1.3.0] - 2026-09-06
 

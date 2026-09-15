@@ -352,6 +352,45 @@ class ToolchainExecTableTest {
     }
 
     /**
+     * The same damage must not freeze what does not come from the record. The
+     * app's own rows name nativeLibraryDir, which a reinstall moves, so a table
+     * kept whole over an unreadable state would name the old directory for good.
+     */
+    @Test
+    fun `a state file that cannot be parsed still rebuilds the rows the app owns`() {
+        elf("usr/opt/ruby/bin/ruby")
+        stateFile.writeText(
+            """[{"name":"ruby","installRoot":"usr/opt/ruby",""" +
+                """"binaries":["usr/opt/ruby/bin/ruby"],"env":{"RUBYLIB":"x"}}]"""
+        )
+        regenerate()
+        // What an earlier install left: its own rows, plus an opener naming a
+        // library directory this install no longer has.
+        execTable.writeText(
+            execTable.readText().lines().filterNot { it.startsWith("xdg-open\t") }
+                .joinToString("\n") + "xdg-open\t/data/app/old/lib/arm64/libnode.so\t/x.js\n"
+        )
+        stateFile.writeText("""[{"name":"ruby","installRoot":"usr/op""")
+
+        regenerate()
+
+        val lines = tableLines()
+        assertTrue(
+            lines.contains("ruby\t${filesDir.absolutePath}/usr/opt/ruby/bin/ruby"),
+            "the toolchain's row was lost over an unreadable state:\n" + execTable.readText(),
+        )
+        assertTrue(lines.contains("\tRUBYLIB\tx"), "the toolchain's environment row was lost")
+        assertFalse(
+            execTable.readText().contains("/data/app/old/"),
+            "a row naming the previous install's library directory survived:\n" + execTable.readText(),
+        )
+        assertTrue(
+            lines.any { it.startsWith("xdg-open\t${nativeLibDir.absolutePath}/libnode.so") },
+            "the app's own opener was not rebuilt:\n" + execTable.readText(),
+        )
+    }
+
+    /**
      * A manifest naming a binary that is not on disk, a partial extraction, or a
      * file an uninstall took, gets no row. A row for it would be a command that
      * exists on PATH and always fails, which is worse than one that is not there.
@@ -437,8 +476,19 @@ class ToolchainExecTableTest {
         )
     }
 
-    /** A console script pip has written, and the two names beside it that are not. */
-    private fun pipBin() = File(filesDir, "usr/bin").apply { mkdirs() }
+    /**
+     * The directory pip writes console scripts into, holding the `python3` link
+     * [FirstRunSetup.setupToolSymlinks] puts there. Without the link the generator
+     * writes no pip rows at all, and every case below that expects none would pass
+     * for that reason instead of its own.
+     */
+    private fun pipBin() = File(filesDir, "usr/bin").apply {
+        mkdirs()
+        val python = File(this, "python3").toPath()
+        if (!Files.exists(python, LinkOption.NOFOLLOW_LINKS)) {
+            Files.createSymbolicLink(python, File(nativeLibDir, "libpython.so").toPath())
+        }
+    }
 
     /**
      * What `pip install black` leaves behind, and why it does not run without this.
@@ -452,6 +502,10 @@ class ToolchainExecTableTest {
      * The interpreter form has no such step. The trampoline starts because it lives
      * in nativeLibraryDir, and it runs the bundled Python with the script as an
      * argument, so nothing under filesDir is ever execve'd.
+     *
+     * The interpreter is the `usr/bin/python3` link and not the `.so` behind it,
+     * because Python reports the path it was started by as `sys.executable`, and a
+     * path under nativeLibraryDir is one the next app update moves.
      */
     @Test
     fun `a command pip installed gets a row that runs it through Python`() {
@@ -462,7 +516,7 @@ class ToolchainExecTableTest {
 
         assertEquals(
             listOf(
-                "black\t${nativeLibDir.absolutePath}/libpython.so" +
+                "black\t${filesDir.absolutePath}/usr/bin/python3" +
                     "\t${filesDir.absolutePath}/usr/bin/black"
             ),
             tableLines().filter { it.startsWith("black\t") },
@@ -560,4 +614,39 @@ class ToolchainExecTableTest {
             "the pip script displaced the toolchain's own command",
         )
     }
+
+    /**
+     * What `gem install rubocop` leaves behind: a Ruby-shebang script in
+     * `$GEM_HOME/bin`, which is on no PATH and cannot be execve'd, so the command
+     * reported success and was then not found. It gets a row through the Ruby the
+     * manifest ships, and a script there naming another interpreter does not.
+     */
+    @Test
+    fun `a command gem installed gets a row that runs it through Ruby`() {
+        elf("usr/bin/ruby")
+        stateFile.writeText(
+            """[{"name":"ruby","binaries":["usr/bin/ruby"],""" +
+                """"env":{"GEM_HOME":"${'$'}HOME/.gem/ruby"}}]"""
+        )
+        val gemBin = File(filesDir, "home/.gem/ruby/bin").apply { mkdirs() }
+        File(gemBin, "rubocop").writeText("#!${filesDir.absolutePath}/usr/bin/ruby\nload 'x'\n")
+        File(gemBin, "notruby").writeText("#!/bin/sh\necho hi\n")
+
+        regenerate()
+
+        assertEquals(
+            listOf(
+                "rubocop\t${filesDir.absolutePath}/usr/bin/ruby" +
+                    "\t${filesDir.absolutePath}/home/.gem/ruby/bin/rubocop"
+            ),
+            tableLines().filter { it.startsWith("rubocop\t") },
+            "nothing runs `rubocop`, so a gem's command is still not found:\n" + execTable.readText(),
+        )
+        assertEquals(
+            emptyList<String>(),
+            tableLines().filter { it.startsWith("notruby\t") },
+            "a shell script in the gem bin directory was routed through Ruby",
+        )
+    }
+
 }

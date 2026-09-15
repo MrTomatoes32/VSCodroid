@@ -799,7 +799,10 @@ class ToolchainManager(private val context: Context) {
         if (installRoot.isNotEmpty()) {
             val dir = File(context.filesDir, installRoot)
             if (dir.exists()) {
-                dir.deleteRecursively()
+                // Link-aware, not File.deleteRecursively, which follows a directory
+                // link: `ln -s ~/projects/mygem/lib/mygem` into Ruby's load path is an
+                // ordinary thing to do, and removing Ruby then emptied the project.
+                StorageManager.deleteRecursive(dir)
                 Logger.d(tag, "Deleted install root: $installRoot")
             }
         }
@@ -1662,7 +1665,10 @@ class ToolchainManager(private val context: Context) {
         }
         val dir = File(context.filesDir, installRoot)
         if (!dir.exists()) return
-        if (dir.deleteRecursively()) {
+        // Link-aware for the reason uninstallLocked gives. It reports bytes rather
+        // than success, so what is left on disk is the answer.
+        StorageManager.deleteRecursive(dir)
+        if (!dir.exists()) {
             Logger.i(tag, "Reclaimed the partial $name tree under $installRoot")
         } else {
             Logger.w(tag, "Could not fully reclaim the partial $name tree under $installRoot")
@@ -2919,16 +2925,7 @@ class ToolchainManager(private val context: Context) {
      * describes a set of toolchains that never existed.
      */
     private fun regenerateExecTableLocked() {
-        val installed = readableState()
-        if (installed == null) {
-            // Damage is not absence, exactly as in [regenerateEnvFileLocked].
-            // Deleting the table over a state file this could not parse would
-            // take every toolchain command off PATH on every launch, while the
-            // payload it names is still on disk and still runnable through the
-            // table that was last written correctly.
-            Logger.w(tag, "toolchains.json is unreadable; keeping the exec table as it stands")
-            return
-        }
+        val readable = readableState()
         // No early return for an empty record any more. The table is no longer
         // only about toolchains: the row this app owns below has to exist on a
         // device that has never installed one, which is most devices.
@@ -2938,9 +2935,34 @@ class ToolchainManager(private val context: Context) {
         // unreadable, and this file is one of the first things to look at when
         // a command goes missing.
         val rows = LinkedHashMap<String, String>()
+        // Where `gem install` puts commands, with the Ruby that runs them, for
+        // [addInstalledScriptRows] after the loop.
+        var gemBin: Pair<File, String>? = null
         // Keyed by variable, so a later toolchain wins a collision: the same
         // outcome sourcing the env file top to bottom gives a redefined export.
         val envRows = LinkedHashMap<String, String>()
+        if (readable == null) {
+            // Damage is not absence, exactly as in [regenerateEnvFileLocked].
+            // Deleting the table over a state file this could not parse would
+            // take every toolchain command off PATH on every launch, while the
+            // payload it names is still on disk and still runnable. So the rows
+            // the last good pass wrote are carried, when every path they name is
+            // still there. Nothing more than that: returning here instead, as this
+            // once did, also froze the rows below that name nativeLibraryDir and
+            // the links into it, which the next app update moves, so xdg-open and
+            // every pip command stopped starting on such a device for good.
+            Logger.w(tag, "toolchains.json is unreadable; carrying the previous toolchain rows")
+            execTable.takeIf { it.isFile }?.readLines()?.forEach { line ->
+                val fields = line.split('\t')
+                if (fields.size < 2) return@forEach
+                if (fields[0].isEmpty()) {
+                    envRows[fields[1]] = line
+                } else if (fields.drop(1).all { it.startsWith("$filesDir/") && File(it).exists() }) {
+                    rows[fields[0]] = line
+                }
+            }
+        }
+        val installed = readable ?: JSONArray()
         for (i in 0 until installed.length()) {
             val tc = installed.optJSONObject(i) ?: continue
             val name = tc.optString("name", "unknown")
@@ -3002,6 +3024,12 @@ class ToolchainManager(private val context: Context) {
                     }
                 }
             }
+
+            val gemHome = env?.optString("GEM_HOME", "").orEmpty()
+            val ruby = elfPaths["ruby"]
+            if (gemHome.isNotEmpty() && ruby != null) {
+                gemBin = File(expandToolchainValue(gemHome), "bin") to ruby
+            }
         }
 
         // The one row this app owns rather than a toolchain. `putIfAbsent`, and
@@ -3021,7 +3049,9 @@ class ToolchainManager(private val context: Context) {
             "xdg-open",
             "xdg-open\t${Environment.getNodePath(context)}\t$filesDir/server/xdg-open.js",
         )
-        addPipInstalledScriptRows(rows)
+        val binDir = File(context.filesDir, "usr/bin")
+        addInstalledScriptRows(rows, binDir, File(binDir, "python3").absolutePath, "python", "pip")
+        gemBin?.let { (dir, ruby) -> addInstalledScriptRows(rows, dir, ruby, "ruby", "gem") }
 
         val body = (envRows.values + rows.values).joinToString("\n", postfix = "\n")
         execTable.parentFile?.mkdirs()
@@ -3039,7 +3069,7 @@ class ToolchainManager(private val context: Context) {
     }
 
     /**
-     * Gives every command `pip` has installed a row, so it can actually run.
+     * Gives every command `pip` or `gem` has installed a row, so it can actually run.
      *
      * `pip install black` succeeds, reports success, and writes an executable
      * `usr/bin/black` that is already on PATH, and then the command does not run:
@@ -3059,27 +3089,44 @@ class ToolchainManager(private val context: Context) {
      * with the script as an argument. Nothing is `execve`d under `filesDir` at any
      * point, which is why this works where the shebang does not.
      *
-     * Only `usr/bin`, because that is where pip puts a console script when the
-     * interpreter's prefix is the one the app ships, and only regular files there:
+     * For pip, only `usr/bin`, because that is where pip puts a console script when
+     * the interpreter's prefix is the one the app ships, and only regular files there:
      * every other name in that directory is a symlink [FirstRunSetup.setupToolSymlinks]
-     * made onto an ELF that already runs.
+     * made onto an ELF that already runs. For gem, `$GEM_HOME/bin` from the Ruby
+     * manifest, which is where RubyGems writes a gem's executables when GEM_HOME is
+     * not its default directory, with a `#!` naming Ruby's ELF under `filesDir`: the
+     * same refusal, and on no PATH either.
      *
-     * Only a Python shebang. A script naming some other interpreter is not one
-     * this can help, and handing it to Python would turn a command that does not
-     * start into one that starts and does the wrong thing.
+     * Only a shebang naming [shebangWord]. A script naming some other interpreter is
+     * not one this can help, and handing it to Python or Ruby would turn a command
+     * that does not start into one that starts and does the wrong thing.
+     *
+     * The interpreter named is the `usr/bin/python3` link, never the `.so` it points
+     * at. linker64 hands Python the path it was given as argv[0], and Python keeps
+     * that as `sys.executable`. Measured on an API 33 emulator: given the `.so`,
+     * `sys.executable` is a path under `nativeLibraryDir`, which moves on every
+     * update, so an environment `virtualenv` or `poetry` builds and a kernelspec
+     * `ipython kernel install` writes stop starting after the next one. Given the
+     * link, it is the same `usr/bin/python3` a terminal reports, and
+     * [FirstRunSetup.setupToolSymlinks] repoints that on every launch.
      *
      * Rows already present win, so a toolchain's own command and the app's own
      * `xdg-open` keep their meaning.
      *
-     * The table is rewritten by the launch pass, so a command installed while the
-     * app is running becomes reachable on the next launch rather than at once.
-     * Worth knowing before reading a bug report that says a fresh `pip install`
-     * still is not found.
+     * The table is rewritten by the launch pass and whenever the editor returns to
+     * the foreground (`MainActivity.refreshToolchainCommands`), so a command installed
+     * while the app is in front becomes reachable after switching away and back,
+     * in a new terminal, rather than at once. Worth knowing before reading a bug
+     * report that says a fresh `pip install` still is not found.
      */
-    private fun addPipInstalledScriptRows(rows: LinkedHashMap<String, String>) {
-        val binDir = File(context.filesDir, "usr/bin")
+    private fun addInstalledScriptRows(
+        rows: LinkedHashMap<String, String>,
+        binDir: File,
+        interpreter: String,
+        shebangWord: String,
+        installer: String,
+    ) {
         val names = binDir.list() ?: return
-        val interpreter = "${context.applicationInfo.nativeLibraryDir}/libpython.so"
         if (!File(interpreter).exists()) return
 
         var added = 0
@@ -3110,21 +3157,21 @@ class ToolchainManager(private val context: Context) {
                 false
             }
             if (isSymlink || !script.isFile) continue
-            if (!namesPythonInShebang(script)) continue
+            if (!shebangNames(script, shebangWord)) continue
             rows[name] = "$name\t$interpreter\t${script.absolutePath}"
             added++
         }
-        if (added > 0) Logger.i(tag, "Exec table carries $added pip-installed commands")
+        if (added > 0) Logger.i(tag, "Exec table carries $added $installer-installed commands")
     }
 
     /**
-     * Whether [script] starts with a `#!` line naming a Python interpreter.
+     * Whether [script] starts with a `#!` line naming [word], an interpreter.
      *
      * Reads a bounded head rather than the file: a console script is a few hundred
      * bytes, but nothing stops a user putting something enormous in this directory,
      * and this runs on every launch.
      */
-    private fun namesPythonInShebang(script: File): Boolean = try {
+    private fun shebangNames(script: File, word: String): Boolean = try {
         script.inputStream().use { stream ->
             val head = ByteArray(SHEBANG_HEAD_BYTES)
             val read = stream.read(head)
@@ -3132,7 +3179,7 @@ class ToolchainManager(private val context: Context) {
                 false
             } else {
                 val first = String(head, 0, read, Charsets.ISO_8859_1).substringBefore('\n')
-                first.startsWith("#!") && first.contains("python")
+                first.startsWith("#!") && first.contains(word)
             }
         }
     } catch (e: Exception) {

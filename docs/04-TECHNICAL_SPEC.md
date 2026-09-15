@@ -58,12 +58,15 @@ line; bumping either means checking the other.
 `verify-android-elf.py` checks it on everything a download script places: all of
 `jniLibs/arm64-v8a` (swept as a directory by the `verifyBundledBinaries` Gradle task),
 `assets/usr/lib`, the Python stdlib including `lib-dynload`, and the toolchain packs.
-It does **not** reach the server tree's own `.node` addons. Those are covered for
-architecture by `verify-server-tree.py` and for `DT_NEEDED` by
-`gen-glibc-forwarders.py --scan`, which the `verifyNativeAddons` Gradle task runs over
-`assets/vscode-reh`, `assets/extensions` and `assets/usr/lib/node-addons`; neither reads `p_align`. Every addon in the
-tree is 16 KB-aligned today, so this is a gap in what is checked rather than in what
-ships. `CONTRIBUTING.md` lists the callers, and it is the honest list.
+The packaged `.node` addons are covered twice. `scripts/build-native-addons.sh` runs
+`verify-android-elf.py` on each addon it builds (node-pty, `@parcel/watcher`,
+`@vscode/sqlite3` and zeromq). At packaging time the `verifyPackagedAlignment` Gradle task
+runs `verify-android-elf.py --tree` over all of `assets/`, which checks LOAD alignment and
+PT_INTERP for every aarch64 ELF there. That includes the addons no script here builds,
+such as `kerberos.node`, `watchdog.node` and the Copilot prebuilds, and it checks the four
+built ones again whether or not the build script ran. `DT_NEEDED` is
+deliberately not asked of that tree: `gen-glibc-forwarders.py --scan` asks it in the
+`verifyNativeAddons` Gradle task, and `verify-server-tree.py` checks architecture.
 
 ### 1.3 Python Runtime
 
@@ -382,6 +385,7 @@ val env = mapOf(
                                                                        // loads this build instead of its own
     "VSCODROID_PORT"          to port.toString(),
     "VSCODROID_VERSION"       to BuildConfig.VERSION_NAME,
+    "VSCODROID_PACKAGE"       to context.packageName,  // server.js pins the sign-in intent to it
 )
 ```
 
@@ -419,11 +423,14 @@ where it used to delete both.
 
 The generator also scans `usr/bin` for regular files whose `#!` line names Python, which is what
 `pip install` writes for a package that ships a command, and gives each one an interpreter row onto
-`libpython.so`. Without it `pip install black` produced a `black` on PATH that answered
+the `usr/bin/python3` link rather than the `libpython.so` behind it, so `sys.executable` is a path an
+app update does not move. Without it `pip install black` produced a `black` on PATH that answered
 `bad interpreter: Permission denied`, since reaching the interpreter through a shebang means
 `execve` on the script's own inode. Symlinks in that directory are skipped: those are the bundled
-tools, already pointing at ELFs that run. The rows are written by the launch pass, so a command
-installed while the app is running is reachable on the next launch.
+tools, already pointing at ELFs that run. The same scan covers `$GEM_HOME/bin` from the Ruby
+manifest for Ruby-shebang files, which is where `gem install` writes a gem's commands. The rows are
+written by the launch pass and again whenever the editor returns to the foreground, so a command
+installed while the app is in front is reachable after switching away and back.
 
 ---
 

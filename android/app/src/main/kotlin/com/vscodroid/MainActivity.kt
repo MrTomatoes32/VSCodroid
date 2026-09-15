@@ -63,6 +63,7 @@ import com.vscodroid.keyboard.KeyInjector
 import com.vscodroid.service.NodeService
 import com.vscodroid.service.StartupNotice
 import com.vscodroid.setup.FirstRunSetup
+import com.vscodroid.setup.ToolchainManager
 import com.vscodroid.storage.SafFolderInfo
 import com.vscodroid.storage.SafStorageManager
 import com.vscodroid.util.Logger
@@ -260,6 +261,12 @@ class MainActivity : AppCompatActivity() {
      */
     @Volatile
     private var syncingFolder: Uri? = null
+
+    /**
+     * The mirror [adoptWorkbenchFolder] last said has no grant, so the second of the
+     * two page loads a folder switch produces does not say it again. Main thread only.
+     */
+    private var ungrantedMirrorNoticed: String? = null
 
     /**
      * Held for the whole of one device folder open, from stopping the previous
@@ -897,8 +904,11 @@ class MainActivity : AppCompatActivity() {
         // armed this id proves nothing about who is answering it.
         //
         // The secret the editor server bound into its own callback page this run is
-        // what closes that. It is served from the server's origin, which no other
-        // origin can read, and it is recorded inside the app sandbox. Refused in
+        // what closes that for a web page. It is served from the server's origin,
+        // which no other browser origin can read, and it is recorded inside the app
+        // sandbox. It does not close it for another app on the device, which can
+        // fetch `/callback` over loopback without the connection token; see the
+        // binding in server.js. Refused in
         // the same silence as the branch above and before the window is consulted,
         // so a forged callback can neither raise a message nor spend the arming the
         // user's real callback still needs.
@@ -1046,6 +1056,28 @@ class MainActivity : AppCompatActivity() {
     override fun onStart() {
         super.onStart()
         handleResumeFromBackground()
+        refreshToolchainCommands()
+    }
+
+    /**
+     * Rebuilds the exec table each time the editor comes to the foreground.
+     *
+     * A command `pip install` writes cannot run until the table has a row for it, and
+     * the table was rebuilt only by SplashActivity's launch pass. Leaving with Back or
+     * Home and tapping the icon brings this singleTask activity back without that
+     * pass, so "open VSCodroid again" left the command failing with `bad interpreter`
+     * until the task was swiped from Recents. Cheap: one listing of `usr/bin` and two
+     * small files written atomically, serialised with installs by the manager's lock.
+     */
+    private fun refreshToolchainCommands() {
+        val toolchains = ToolchainManager(applicationContext)
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                toolchains.regenerateDerivedFiles()
+            } catch (e: Exception) {
+                Logger.w(tag, "Could not refresh the toolchain commands: ${e.message}")
+            }
+        }
     }
 
     override fun onTrimMemory(level: Int) {
@@ -1074,7 +1106,14 @@ class MainActivity : AppCompatActivity() {
      * Called from [AndroidBridge.openFolderPicker] via JS bridge.
      */
     fun openFolderPicker() {
-        folderPickerLauncher.launch(null)
+        // Guarded like the file chooser: a device with DocumentsUI disabled throws
+        // here on the main thread, and an uncaught throw ends the process with the
+        // server in it.
+        try {
+            folderPickerLauncher.launch(null)
+        } catch (e: ActivityNotFoundException) {
+            Logger.w(tag, "No document tree picker on this device", e)
+        }
     }
 
     /**
@@ -1089,9 +1128,10 @@ class MainActivity : AppCompatActivity() {
      * grant later lapsed, the launch reclaim deleted the mirror and the work with
      * it, having never existed anywhere the user could see.
      *
-     * Reopening through the picker did not rescue those edits either: the sync
-     * keeps a mirror copy that is newer and moves on without uploading it, and
-     * writes only enter the upload journal from a write-back, so nothing retried.
+     * A mirror whose folder has no grant any more cannot be adopted: the workbench
+     * still lists it in Open Recent after the recent list drops it and releases the
+     * grant. That one is said on screen instead, since edits there stay in the copy
+     * until the folder is picked again, which syncs it and uploads the newer files.
      *
      * Three things are checked before acting, and each excludes a different way
      * of doing this twice: a path that is not under any mirror is an ordinary
@@ -1106,7 +1146,22 @@ class MainActivity : AppCompatActivity() {
             // workspace is a mirror reaches it with the workbench already drawn.
             val folder = withContext(Dispatchers.IO) {
                 safManager.folderForOpenedPath(folderPath)
-            } ?: return@launch
+            }
+            val mirror = SafStorageManager.mirrorNameFor(
+                folderPath, Environment.getSafMirrorsDir(this@MainActivity),
+            )
+            if (folder == null) {
+                if (mirror != null && mirror != ungrantedMirrorNoticed) {
+                    Logger.w(
+                        tag,
+                        "The workbench opened device folder copy $mirror, which has no grant; nothing syncs it",
+                    )
+                    Toast.makeText(this@MainActivity, R.string.saf_permission_expired, Toast.LENGTH_LONG).show()
+                }
+                ungrantedMirrorNoticed = mirror
+                return@launch
+            }
+            ungrantedMirrorNoticed = null
             // Back on the main thread, which is where both of these are written:
             // the coroutine resumes on Dispatchers.Main.immediate, and a second
             // page load cannot interleave between the resume and openSafFolder's
@@ -2248,7 +2303,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupServiceCallbacks() {
-        nodeService?.onServerReady = { port ->
+        nodeService?.onServerReady = { port, sameServer ->
             // Recorded whatever the page says, so the reload the crash page
             // offers has a port to load when the user does ask.
             serverPort = port
@@ -2259,6 +2314,11 @@ class MainActivity : AppCompatActivity() {
                 // one more turn; see rendererCrashLoopShown.
                 if (rendererCrashLoopShown) {
                     Logger.i(tag, "Server ready again; the renderer-crash page stays up until asked")
+                } else if (sameServer && isWorkbenchUrl(webView?.url, port)) {
+                    // Only the bootstrap died, and the page is still connected to
+                    // the editor server that was adopted back. A reload would
+                    // restart the extension host for nothing.
+                    Logger.i(tag, "Adopted the server the page is connected to; not reloading")
                 } else {
                     loadVSCode(port)
                 }
@@ -4633,7 +4693,7 @@ class MainActivity : AppCompatActivity() {
             .setPositiveButton(getString(R.string.dialog_ok), null)
             .setNeutralButton(getString(R.string.about_licenses)) { _, _ -> showLicensesDialog() }
             .setNegativeButton(getString(R.string.about_privacy_policy)) { _, _ ->
-                startActivity(Intent(Intent.ACTION_VIEW, "https://rmyndharis.github.io/VSCodroid/privacy-policy.html".toUri()))
+                openInBrowser("https://rmyndharis.github.io/VSCodroid/privacy-policy.html")
             }
             .show()
     }
@@ -4663,9 +4723,22 @@ class MainActivity : AppCompatActivity() {
                 showLicenseTextsDialog()
             }
             .setNeutralButton(getString(R.string.licenses_source_code)) { _, _ ->
-                startActivity(Intent(Intent.ACTION_VIEW, "https://github.com/rmyndharis/VSCodroid".toUri()))
+                openInBrowser("https://github.com/rmyndharis/VSCodroid")
             }
             .show()
+    }
+
+    /**
+     * Opens a page of ours in the browser, and says so when nothing can. With no
+     * browser enabled the launch throws on the main thread, and an uncaught throw
+     * takes the process down with the server and the open session in it.
+     */
+    private fun openInBrowser(url: String) {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, url.toUri()))
+        } catch (_: ActivityNotFoundException) {
+            Toast.makeText(this, R.string.open_url_no_handler, Toast.LENGTH_LONG).show()
+        }
     }
 
     /**
