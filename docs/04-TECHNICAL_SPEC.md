@@ -354,7 +354,7 @@ val env = mapOf(
     "LANG"                    to "en_US.UTF-8",
     "PREFIX"                  to "${filesDir}/usr",
     "PYTHONHOME"              to "${filesDir}/usr",
-    "PYTHONDONTWRITEBYTECODE" to "1",
+    "PYTHONPYCACHEPREFIX"     to "${cacheDir}/pycache",
     "GIT_EXEC_PATH"           to "${filesDir}/usr/lib/git-core",
     "GIT_TEMPLATE_DIR"        to "${filesDir}/usr/share/git-core/templates",
     "GIT_SSH_COMMAND"         to "${nativeLibDir}/libssh.so -F ${filesDir}/home/.ssh/config",
@@ -372,6 +372,7 @@ val env = mapOf(
     "SSL_CERT_DIR"            to "<system trust store>",
     "NPM_CONFIG_PREFIX"       to "${filesDir}/usr",
     "NPM_CONFIG_CACHE"        to "${cacheDir}/npm-cache",
+    "PIP_CACHE_DIR"           to "${cacheDir}/pip",
     "PROJECTS_DIR"            to "<projects dir>",
     "USE_BUILTIN_RIPGREP"     to "0",                 // falsy sends the Claude CLI to rg on PATH
     "ZEROMQ_PREBUILD"         to "${filesDir}/usr/lib/node-addons/zeromq",  // the Jupyter extension's
