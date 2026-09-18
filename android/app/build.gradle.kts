@@ -144,7 +144,7 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {
-            abiFilters += "arm64-v8a"
+            abiFilters += "arm64-v8a", "armeabi-v7a"
         }
 
         // How much room first-run extraction needs is the size of the asset tree,
