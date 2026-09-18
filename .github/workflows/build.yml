@@ -10,7 +10,7 @@ concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
-# Read by default. Neither job here publishes anything: the only step that
+# Read default. Neither job here publishes anything: the only step that
 # reaches GitHub is the server fetch, which asks the API for a release asset.
 # Without this block the token's scope is whatever the repository's default
 # workflow permissions happen to be, which is a setting outside this file and
